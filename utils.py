@@ -1,4 +1,6 @@
+# -*- coding: utf-8 -*-
 import os
+import sys
 
 
 def is_repo_ready(github_repo):
@@ -9,3 +11,7 @@ def is_repo_ready(github_repo):
     if len(items) <= 1:
         return False
     return True
+
+
+def is_repo_has_readme(repo):
+    return repo.get('readme_text') is not None
