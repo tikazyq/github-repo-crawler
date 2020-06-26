@@ -81,7 +81,7 @@ def upload_zip_files(github_repo):
     zip_filepath = f'/tmp/{github_repo["full_name"]}.zip'
     qiniu_filepath = f'{github_repo["full_name"]}.zip'
     subprocess.run(['zip', '-r', zip_filepath, repo_path], check=True)
-    qiniu_utils.upload(qiniu_bucket_name, zip_filedir, qiniu_filepath)
+    qiniu_utils.upload(qiniu_bucket_name, zip_filepath, qiniu_filepath)
 
 
 def run():
@@ -104,7 +104,10 @@ def run():
 
         repo_path = f'{github_repo["full_name"]}.zip'
         if not qiniu_utils.is_file_exist(qiniu_bucket_name, repo_path):
-            upload_zip_files(github_repo)
+            try:
+                upload_zip_files(github_repo)
+            except Exception as ex:
+                print(ex)
 
 
 if __name__ == '__main__':
