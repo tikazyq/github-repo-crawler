@@ -5,10 +5,12 @@ import shutil
 
 import requests
 from pymongo import MongoClient
+from elasticsearch import Elasticsearch
 
 import qiniu_utils
 from utils import is_repo_ready, is_repo_has_readme
 
+# mongo 配置
 MONGO_HOST = os.environ.get('CRAWLAB_MONGO_HOST') or 'localhost'
 MONGO_PORT = int(os.environ.get('CRAWLAB_MONGO_PORT') or 27017) or 27017
 MONGO_DB = os.environ.get('CRAWLAB_MONGO_DB') or 'test'
@@ -27,7 +29,14 @@ db = mongo.get_database(MONGO_DB)
 col_repos = db.get_collection('cc_repos')
 col_github_repos = db.get_collection('results_github-crawler')
 
+# 七牛配置
 qiniu_bucket_name = 'crawlab-repo'
+
+# ES 配置
+ES_HOST = 'vm01.crawlab.cn'
+ES_PORT = '9200'
+ES_INDEX = 'repos'
+es = Elasticsearch(hosts=[f'{ES_HOST}:{ES_PORT}'])
 
 
 def clone_repo(github_repo):
@@ -48,7 +57,7 @@ def download_repo(github_repo):
 
     subprocess.run([
         'curl',
-        '-x', '149.129.63.159:80',
+        # '-x', '149.129.63.159:80',
         f'https://codeload.github.com/{github_repo["full_name"]}/zip/master',
         '-o', '/tmp/master.zip',
     ], check=True)
@@ -65,7 +74,8 @@ def fetch_readme_text(github_repo):
     }
     print('[' + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + '] fetching readme of ' + github_repo['full_name'])
     url = f'https://raw.githubusercontent.com/{github_repo["full_name"]}/master/README.md'
-    r = requests.get(url, proxies=proxies)
+    # r = requests.get(url, proxies=proxies)
+    r = requests.get(url)
     if r.status_code != 200:
         return
     content = r.content.decode('utf-8')
@@ -84,30 +94,55 @@ def upload_zip_files(github_repo):
     qiniu_utils.upload(qiniu_bucket_name, zip_filepath, qiniu_filepath)
 
 
+def index_es_repo(repo, github_repo):
+    github_repo['id'] = str(repo['_id'])
+    github_repo['is_sub_dir'] = repo.get('is_sub_dir') or False
+    github_repo['readme_text'] = repo.get('readme_text')
+    del github_repo['_id']
+    print(github_repo)
+    es.index(
+        index=ES_INDEX,
+        body=github_repo,
+        id=github_repo['id'],
+    )
+
+
 def run():
     for repo in col_repos.find({'enabled': True}):
         github_repo = col_github_repos.find_one({'_id': repo['github_repo_id']})
         if github_repo is None:
             continue
         print('[' + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + '] processing ' + github_repo['full_name'])
+
+        # 下载 README
         if not is_repo_has_readme(repo):
             try:
                 fetch_readme_text(github_repo)
             except Exception as ex:
                 print(ex)
+        github_repo = col_github_repos.find_one({'_id': repo['github_repo_id']})
 
+        # 下载 Repo
         if not is_repo_ready(github_repo):
             try:
                 download_repo(github_repo)
             except Exception as ex:
                 print(ex)
 
+        # 上传 Repo 到 OSS
         repo_path = f'{github_repo["full_name"]}.zip'
         if not qiniu_utils.is_file_exist(qiniu_bucket_name, repo_path):
             try:
                 upload_zip_files(github_repo)
             except Exception as ex:
                 print(ex)
+
+        # 加入 ES 索引
+        try:
+            print(github_repo['full_name'])
+            index_es_repo(repo, github_repo)
+        except Exception as ex:
+            print(ex)
 
 
 if __name__ == '__main__':
