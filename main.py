@@ -8,7 +8,7 @@ from pymongo import MongoClient
 from elasticsearch import Elasticsearch
 
 import qiniu_utils
-from utils import is_repo_ready, is_repo_has_readme
+from utils import is_repo_ready, is_repo_has_readme, zip_dir
 
 # mongo 配置
 MONGO_HOST = os.environ.get('CRAWLAB_MONGO_HOST') or 'localhost'
@@ -33,9 +33,9 @@ col_github_repos = db.get_collection('results_github-crawler')
 qiniu_bucket_name = 'crawlab-repo'
 
 # ES 配置
-ES_HOST = 'vm01.crawlab.cn'
-ES_PORT = '9200'
-ES_INDEX = 'repos'
+ES_HOST = os.environ.get('ES_HOST')
+ES_PORT = os.environ.get('ES_PORT')
+ES_INDEX = os.environ.get('ES_INDEX')
 es = Elasticsearch(hosts=[f'{ES_HOST}:{ES_PORT}'])
 
 
@@ -49,18 +49,19 @@ def clone_repo(github_repo):
 
 
 def download_repo(github_repo):
-    print('[' + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + '] downloading ' + github_repo['full_name'])
     repo_path = f'/data/github.com/{github_repo["full_name"]}'
     repo_user_path = f'/data/github.com/{github_repo["full_name"].split("/")[0]}'
     if not os.path.exists(repo_user_path):
         os.mkdir(repo_user_path)
 
-    subprocess.run([
-        'curl',
-        # '-x', '149.129.63.159:80',
-        f'https://codeload.github.com/{github_repo["full_name"]}/zip/master',
-        '-o', '/tmp/master.zip',
-    ], check=True)
+    proxies = {
+        "http": "http://149.129.63.159:14128",
+        "https": "http://149.129.63.159:14128",
+    }
+    url = f'https://codeload.github.com/{github_repo["full_name"]}/zip/master'
+    res = requests.get(url, proxies=proxies)
+    with open('/tmp/master.zip', 'wb') as f:
+        f.write(res.content)
     subprocess.run(['unzip', '/tmp/master.zip'], check=True)
     subprocess.run(['mv', f'{github_repo["name"]}-master', repo_path], check=True)
     subprocess.run(['rm', '/tmp/master.zip'], check=True)
@@ -69,13 +70,13 @@ def download_repo(github_repo):
 
 def fetch_readme_text(github_repo):
     proxies = {
-        "http": "http://149.129.63.159:80",
-        "https": "http://149.129.63.159:80",
+        "http": "http://149.129.63.159:14128",
+        "https": "http://149.129.63.159:14128",
     }
     print('[' + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + '] fetching readme of ' + github_repo['full_name'])
     url = f'https://raw.githubusercontent.com/{github_repo["full_name"]}/master/README.md'
-    # r = requests.get(url, proxies=proxies)
-    r = requests.get(url)
+    r = requests.get(url, proxies=proxies)
+    # r = requests.get(url)
     if r.status_code != 200:
         return
     content = r.content.decode('utf-8')
@@ -85,12 +86,23 @@ def fetch_readme_text(github_repo):
 
 def upload_zip_files(github_repo):
     repo_path = f'/data/github.com/{github_repo["full_name"]}'
-    zip_filedir = f'/tmp/{github_repo["full_name"].split("/")[0]}'
-    if not os.path.exists(zip_filedir):
-        os.mkdir(zip_filedir)
+    zip_file_dir = f'/tmp/{github_repo["full_name"].split("/")[0]}'
+    if not os.path.exists(zip_file_dir):
+        os.makedirs(zip_file_dir)
     zip_filepath = f'/tmp/{github_repo["full_name"]}.zip'
     qiniu_filepath = f'{github_repo["full_name"]}.zip'
-    subprocess.run(['zip', '-r', zip_filepath, repo_path], check=True)
+    zip_dir(repo_path, zip_filepath)
+    qiniu_utils.upload(qiniu_bucket_name, zip_filepath, qiniu_filepath)
+
+
+def upload_sub_dir_zip_files(github_repo, sub_dir):
+    repo_path = f'/data/github.com/{github_repo["full_name"]}/{sub_dir}'
+    zip_file_dir = f'/tmp/{github_repo["full_name"]}'
+    if not os.path.exists(zip_file_dir):
+        os.makedirs(zip_file_dir)
+    zip_filepath = f'/tmp/{github_repo["full_name"]}/{sub_dir}.zip'
+    qiniu_filepath = f'{github_repo["full_name"]}/{sub_dir}.zip'
+    zip_dir(repo_path, zip_filepath)
     qiniu_utils.upload(qiniu_bucket_name, zip_filepath, qiniu_filepath)
 
 
@@ -99,7 +111,6 @@ def index_es_repo(repo, github_repo):
     github_repo['is_sub_dir'] = repo.get('is_sub_dir') or False
     github_repo['readme_text'] = repo.get('readme_text')
     del github_repo['_id']
-    print(github_repo)
     es.index(
         index=ES_INDEX,
         body=github_repo,
@@ -117,6 +128,7 @@ def run():
         # 下载 README
         if not is_repo_has_readme(repo):
             try:
+                print('[' + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + '] fetching readme ' + github_repo['full_name'])
                 fetch_readme_text(github_repo)
             except Exception as ex:
                 print(ex)
@@ -125,21 +137,36 @@ def run():
         # 下载 Repo
         if not is_repo_ready(github_repo):
             try:
+                print('[' + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + '] downloading repo ' + github_repo['full_name'])
                 download_repo(github_repo)
             except Exception as ex:
                 print(ex)
 
         # 上传 Repo 到 OSS
-        repo_path = f'{github_repo["full_name"]}.zip'
-        if not qiniu_utils.is_file_exist(qiniu_bucket_name, repo_path):
+        qiniu_repo_path = f'{github_repo["full_name"]}.zip'
+        if not qiniu_utils.is_file_exist(qiniu_bucket_name, qiniu_repo_path):
             try:
+                print('[' + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + '] upload zip files ' + github_repo['full_name'])
                 upload_zip_files(github_repo)
             except Exception as ex:
                 print(ex)
 
+        # 上传 Repo 子目录到 OSS
+        if repo.get('is_sub_dir'):
+            print('[' + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + '] upload sub-dir zip files ' + github_repo['full_name'])
+            repo_path = f'/data/github.com/{github_repo["full_name"]}'
+            for sub_dir in os.listdir(repo_path):
+                qiniu_repo_path = f'{github_repo["full_name"]}/{sub_dir}.zip'
+                if os.path.isdir(f'{repo_path}/{sub_dir}') and not sub_dir.startswith('.') and not qiniu_utils.is_file_exist(qiniu_bucket_name, qiniu_repo_path):
+                    try:
+                        print('[' + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + '] upload ' + github_repo['full_name'] + '/' + sub_dir)
+                        upload_sub_dir_zip_files(github_repo, sub_dir)
+                    except Exception as ex:
+                        print(ex)
+
         # 加入 ES 索引
         try:
-            print(github_repo['full_name'])
+            print('[' + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + '] index es repo ' + github_repo['full_name'])
             index_es_repo(repo, github_repo)
         except Exception as ex:
             print(ex)
