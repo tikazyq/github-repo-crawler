@@ -59,7 +59,8 @@ def download_repo(github_repo):
         "https": "http://149.129.63.159:14128",
     }
     url = f'https://codeload.github.com/{github_repo["full_name"]}/zip/master'
-    res = requests.get(url, proxies=proxies)
+    # res = requests.get(url, proxies=proxies)
+    res = requests.get(url)
     with open('/tmp/master.zip', 'wb') as f:
         f.write(res.content)
     subprocess.run(['unzip', '/tmp/master.zip'], check=True)
@@ -75,8 +76,8 @@ def fetch_readme_text(github_repo):
     }
     print('[' + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + '] fetching readme of ' + github_repo['full_name'])
     url = f'https://raw.githubusercontent.com/{github_repo["full_name"]}/master/README.md'
-    r = requests.get(url, proxies=proxies)
-    # r = requests.get(url)
+    # r = requests.get(url, proxies=proxies)
+    r = requests.get(url)
     if r.status_code != 200:
         return
     content = r.content.decode('utf-8')
